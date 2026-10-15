@@ -38,6 +38,7 @@ DEFAULT_MODEL = "minishlab/potion-retrieval-32M"
 BM25_K1, BM25_B = 1.5, 0.75
 DENSE_SUMMARY_CHARS = 1000  # keep the head of the abstract (transformer models read <= 512 tokens)
 DEPTH = 200  # depth of each ranked list entering the fusion
+DENSE_CHUNK = 8192  # rows per block in dense_scores (~16 MB float32 temp at dim 512)
 SECTOR_BOOST = {"primary": 1.15, "tag": 1.05}  # soft: sector labels are ~63% precise
 
 # Fields kept per record in docs.json.gz (what a result needs to cite and link).
@@ -224,8 +225,14 @@ class WildIndex:
         return np.asarray(self.bm25[:, cols].sum(axis=1)).ravel()
 
     def dense_scores(self, query: str) -> np.ndarray:
-        q = self.embedder([query], "query")[0]
-        return (self.vectors @ q.astype(np.float32)) / self.meta["scale"]
+        # Score in row blocks: a whole-matrix `int8 @ float32` would upcast all ~99k x dim
+        # vectors to a temporary float32 copy (about 200 MB at dim 512) on every query.
+        q = np.asarray(self.embedder([query], "query")[0], dtype=np.float32)
+        n = self.vectors.shape[0]
+        out = np.empty(n, dtype=np.float32)
+        for start in range(0, n, DENSE_CHUNK):
+            out[start:start + DENSE_CHUNK] = self.vectors[start:start + DENSE_CHUNK] @ q
+        return out / self.meta["scale"]
 
     @staticmethod
     def _top(scores: np.ndarray, depth: int, positive_only: bool) -> list[int]:

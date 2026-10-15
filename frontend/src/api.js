@@ -3,7 +3,9 @@ const API_BASE = import.meta.env.VITE_API_BASE || '/api/v1'
 // Those are embedded in the public JS bundle. Secrets belong on the server only.
 
 const GEOCODE_TIMEOUT_MS = 12_000
-const RECOMMEND_TIMEOUT_MS = 70_000
+// Must outlast the server's own deadline (RECOMMEND_TIMEOUT_S = 80 s in
+// app/routers/recommendations.py) so the user sees the server's 504 message, not a blind abort.
+const RECOMMEND_TIMEOUT_MS = 85_000
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 30_000) {
   const controller = new AbortController()

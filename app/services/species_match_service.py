@@ -3,7 +3,7 @@ Sylva — Species matching service
 
 Scoring system (max 100 points before degradation bonus):
   pH hard filter     — species outside farm pH range are excluded entirely
-  texture_match      — 15 pts if species prefers the farm's soil texture
+  texture_match      — up to 15 pts: 15 same texture, 10 same dominant texture, 5 shared modifier
   use_alignment      — 25 pts per matching requested use (uncapped if no uses requested)
   nitrogen_fixing    — 15 pts bonus
   degradation_bonus  — 15 pts if farm is degraded (NDVI health_score <= 0.3)
@@ -45,15 +45,39 @@ class SpeciesMatchService:
         self._db = None
         return len(self._load_db())
 
-    @staticmethod
-    def _texture_token_match(farm_texture: str, preference: str) -> bool:
-        """Loose match: 'clay loam' hits prefs like 'clay' or 'loams'."""
-        farm_tokens = set(farm_texture.lower().replace("-", " ").split())
-        pref_tokens = set(preference.lower().replace("-", " ").split())
-        # strip plural noise
-        farm_tokens = {t.rstrip("s") for t in farm_tokens if len(t) > 2}
-        pref_tokens = {t.rstrip("s") for t in pref_tokens if len(t) > 2}
-        return bool(farm_tokens & pref_tokens)
+    # Adjective forms map to the texture noun so 'sandy loam' and 'sand' share 'sand'.
+    _TEXTURE_STEM = {"sandy": "sand", "clayey": "clay", "loamy": "loam", "silty": "silt"}
+
+    @classmethod
+    def _texture_tokens(cls, text: str) -> list[str]:
+        out = []
+        for t in text.lower().replace("-", " ").split():
+            t = cls._TEXTURE_STEM.get(t, t)
+            if t.endswith("s") and len(t) > 3:  # plural noise: 'loams', 'clays'
+                t = t[:-1]
+            if len(t) > 2:
+                out.append(t)
+        return out
+
+    @classmethod
+    def _texture_overlap(cls, farm_texture: str, preference: str) -> float:
+        """Graded texture match, out of 15.
+
+        USDA class names put the dominant texture last ('sandy clay loam' is a loam), so:
+        15 same texture, 10 same dominant texture ('silt loam' vs pref 'loam'),
+        5 only a modifier is shared ('sandy clay loam' vs pref 'sand'), else 0.
+        A shared common word such as 'loam' no longer counts as a full match.
+        """
+        farm, pref = cls._texture_tokens(farm_texture), cls._texture_tokens(preference)
+        if not farm or not pref:
+            return 0.0
+        if farm == pref:
+            return 15.0
+        if farm[-1] == pref[-1]:
+            return 10.0
+        if set(farm) & set(pref):
+            return 5.0
+        return 0.0
 
     # ── Scoring helpers ───────────────────────────────────────────────────────
 
@@ -72,11 +96,7 @@ class SpeciesMatchService:
         prefs = species.get("soil_texture_preference") or []
         if not prefs:
             return 0.0
-        ft = farm_texture.lower()
-        for pref in prefs:
-            if ft == pref.lower() or self._texture_token_match(ft, pref):
-                return 15.0
-        return 0.0
+        return max(self._texture_overlap(farm_texture, pref) for pref in prefs)
 
     @staticmethod
     def _use_alignment_score(species: dict, requested_uses: list[str]) -> float:
