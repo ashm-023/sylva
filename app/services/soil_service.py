@@ -11,6 +11,7 @@ We probe nearby farmland offsets, then fall back to a labeled estimate.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 import httpx
@@ -41,17 +42,23 @@ OFFSETS = [
     (-0.1, 0.0),
 ]
 
+# Stop probing offsets when less than this is left of the soil budget.
+MIN_REQUEST_S = 1.0
+
 HEADERS = {
     "User-Agent": "SylvaAgroforestry/0.2 (farm-profile; https://github.com/ashm-023/sylva)",
     "Accept": "application/json",
 }
 
 
-async def _query(client: httpx.AsyncClient, lat: float, lon: float) -> dict:
+async def _query(
+    client: httpx.AsyncClient, lat: float, lon: float, timeout: Optional[httpx.Timeout] = None
+) -> dict:
     params = [("lon", lon), ("lat", lat), ("value", "mean")]
     params += [("property", p) for p in PROPERTIES]
     params += [("depth", d) for d in DEPTHS]
-    resp = await client.get(SOILGRIDS_URL, params=params, headers=HEADERS)
+    kwargs = {"timeout": timeout} if timeout is not None else {}
+    resp = await client.get(SOILGRIDS_URL, params=params, headers=HEADERS, **kwargs)
     resp.raise_for_status()
     return resp.json()
 
@@ -97,7 +104,13 @@ def _topsoil_from_parsed(parsed: dict) -> TopsoilSummary:
     )
 
 
-def estimate_soil(lat: float, lon: float, country: Optional[str] = None) -> SoilProfile:
+class SoilNoDataError(RuntimeError):
+    """SoilGrids answered for every probed cell, but none had data (water, urban, unmapped)."""
+
+
+def estimate_soil(
+    lat: float, lon: float, country: Optional[str] = None, reason: str = "SoilGrids unavailable"
+) -> SoilProfile:
     """
     Coarse regional defaults so the product still works when SoilGrids is down.
     Clearly labeled — never pretend this is a lab measurement.
@@ -165,7 +178,13 @@ def estimate_soil(lat: float, lon: float, country: Optional[str] = None) -> Soil
     return SoilProfile(
         source=f"Regional estimate ({label}) — SoilGrids unavailable",
         topsoil=top,
-        raw_properties={"estimated": True, "lat": lat, "lon": lon, "country": country},
+        raw_properties={
+            "estimated": True,
+            "reason": reason,
+            "lat": lat,
+            "lon": lon,
+            "country": country,
+        },
     )
 
 
@@ -176,16 +195,31 @@ async def fetch_soil(
     country: Optional[str] = None,
     allow_estimate: bool = True,
 ) -> SoilProfile:
+    """Soil for a point. `timeout` is the budget for the whole call, not per request.
+
+    Nearby offsets are probed until the budget runs out, so a slow but responding
+    SoilGrids still leaves time for the regional estimate inside the caller's deadline.
+    The estimate is used only when SoilGrids could not be asked everything (errors,
+    timeouts, budget spent). If every offset answered with empty cells the point is
+    most likely water or unmapped, and SoilNoDataError is raised instead of inventing
+    soil for it.
+    """
     LOG.info("SoilGrids: querying (%.4f, %.4f)", lat, lon)
     last_err: Exception | None = None
+    deadline = time.monotonic() + timeout
+    answered_empty = 0
 
     try:
-        limits = httpx.Timeout(timeout, connect=5.0)
-        async with httpx.AsyncClient(timeout=limits) as client:
+        async with httpx.AsyncClient() as client:
             for dlat, dlon in OFFSETS:
+                remaining = deadline - time.monotonic()
+                if remaining < MIN_REQUEST_S:
+                    last_err = last_err or TimeoutError(f"soil budget of {timeout}s spent")
+                    break
                 q_lat, q_lon = lat + dlat, lon + dlon
+                limits = httpx.Timeout(remaining, connect=min(5.0, remaining))
                 try:
-                    data = await _query(client, q_lat, q_lon)
+                    data = await _query(client, q_lat, q_lon, timeout=limits)
                 except Exception as e:
                     last_err = e
                     LOG.warning("SoilGrids offset (%.3f,%.3f) failed: %s", dlat, dlon, e)
@@ -196,10 +230,12 @@ async def fetch_soil(
 
                 parsed, any_value = _parse(data)
                 if not any_value:
+                    answered_empty += 1
                     continue
 
                 topsoil = _topsoil_from_parsed(parsed)
                 if topsoil.ph is None:
+                    answered_empty += 1
                     continue
 
                 src = "SoilGrids v2.0 (ISRIC)"
@@ -211,14 +247,16 @@ async def fetch_soil(
         last_err = e
         LOG.warning("SoilGrids failed: %s", e)
 
-    if allow_estimate:
-        LOG.warning(
-            "SoilGrids unavailable (%s) — using regional estimate",
-            last_err or "no data",
-        )
-        return estimate_soil(lat, lon, country)
-
-    raise RuntimeError(
+    no_data_msg = (
         "SoilGrids returned no data for this location (likely water, urban, "
         "or an unmapped cell). Try a coordinate on cultivated land."
     )
+    if answered_empty == len(OFFSETS):
+        raise SoilNoDataError(no_data_msg)
+
+    if allow_estimate:
+        reason = f"SoilGrids unavailable ({last_err or 'no usable cell in time'})"
+        LOG.warning("%s — using regional estimate", reason)
+        return estimate_soil(lat, lon, country, reason=reason)
+
+    raise RuntimeError(no_data_msg)

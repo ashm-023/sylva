@@ -78,6 +78,9 @@ async def _build_profile(req: FarmProfileRequest) -> FarmProfile:
             continue
         if name == "soil":
             profile.soil = result
+            if (result.raw_properties or {}).get("estimated"):
+                reason = result.raw_properties.get("reason") or "SoilGrids unavailable"
+                warnings.append(f"Soil values are a regional estimate, not measured ({reason}).")
         elif name == "ndvi":
             profile.ndvi = result
         elif name == "species":

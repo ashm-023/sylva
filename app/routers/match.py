@@ -18,7 +18,7 @@ from app.models.farm import (
     TopsoilSummary,
 )
 from app.models.match import FarmMatchRequest, FarmMatchResponse, SpeciesMatchScore
-from app.routers.farm import _build_profile
+from app.routers.farm import PROFILE_TIMEOUT_S, _build_profile
 from app.services.species_match_service import SpeciesMatchService
 
 LOG = logging.getLogger("sylva.router.match")
@@ -36,7 +36,9 @@ async def get_farm_match(req: FarmMatchRequest):
             radius_km=req.radius_km,
             country=req.country,
         )
-        farm_profile = await asyncio.wait_for(_build_profile(profile_req), timeout=150)
+        farm_profile = await asyncio.wait_for(
+            _build_profile(profile_req), timeout=PROFILE_TIMEOUT_S
+        )
 
         if farm_profile.soil is None or farm_profile.soil.topsoil.ph is None:
             raise HTTPException(
@@ -55,7 +57,9 @@ async def get_farm_match(req: FarmMatchRequest):
     except FileNotFoundError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="farm profile timed out after 150s")
+        raise HTTPException(
+            status_code=504, detail=f"farm profile timed out after {PROFILE_TIMEOUT_S}s"
+        )
 
 
 @router.get("/species/search", response_model=list[SpeciesMatchScore])
