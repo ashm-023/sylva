@@ -1,0 +1,16 @@
+{
+  "model": "minishlab/potion-retrieval-32M",
+  "dim": 512,
+  "count": 99309,
+  "scale": 294.5690465922161,
+  "text_hash": "ff2720f8c27540b543f9442b3a37aa3e50770fa102a298a9ab941dbedc4aa1fa",
+  "bm25": {
+    "k1": 1.5,
+    "b": 0.75,
+    "terms": 83380
+  },
+  "catalogue_generated_on": "2026-10-11",
+  "catalogue_version": "2026-10-11",
+  "built_on": "2026-10-14",
+  "dense_text": "title. organism. first 1000 characters of the summary"
+}

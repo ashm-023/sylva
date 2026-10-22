@@ -30,12 +30,27 @@ catalogue); potion ran at about 1,600 a second (2 minutes).
 ```
 pip install -r requirements-wild.txt
 python -m scripts.nature.wild.build_index            # needs data/nature/catalogue/build/catalogue.json
+python -m scripts.nature.wild.export_query_model     # numpy copy of the query model for the server
 python -m scripts.nature.wild.query "reduce drag on a ship hull" --sector aerospace-transport
 ```
 
 The build writes vectors in parts of 5,000 records, so an interrupted run resumes.
 `--limit N` builds a trial index of the first N records. The model downloads once into
-`data/nature/wild/.model_cache/`; the index and the cache are gitignored.
+`data/nature/wild/.model_cache/` (gitignored).
+
+**The built index is committed** (about 108 MB) so the Vercel function ships it; rebuild
+and commit it again when the catalogue changes. Serving needs only numpy
+(`requirements.txt`): BM25 is read as raw CSC arrays, and a query is embedded by a
+plain-Python WordPiece tokenizer (`app/services/wild/wordpiece.py`) plus the exported
+potion table, which is all the static model does. scipy, fastembed and onnx are
+build-time only. `export_query_model` checks the tokenizer against `tokenizers` on every
+catalogue title and abstract (0 of 114,628 differed) and the embedder against fastembed
+(cosine 0.99996 or better). The top 10 results matched the fastembed ones on all 8 test
+queries; on 3 of them two neighbours swapped places (int8 rounding).
+
+On Vercel each cold start loads the index again (about 1 s); `/wild/ask` waits for it
+rather than answering 503. Dependencies plus bundled data come to about 200 MB of the
+250 MB function limit.
 
 | File | Size | Content |
 |---|---|---|
@@ -44,11 +59,15 @@ The build writes vectors in parts of 5,000 records, so an interrupted run resume
 | `index/vocab.json` | 1.0 MB | the terms, in column order |
 | `index/docs.json.gz` | 14.2 MB | per record: id, title, url, doi, year, kind, source, sectors, area, functions, organism, habitat, group ids, summary and its licence |
 | `index/meta.json` | | model, dimensions, count, scale, text hash, catalogue date, build date |
+| `index/query_model/embeddings.npy` | 32.3 MB | potion token table, int8, 63,091 x 512 |
+| `index/query_model/scales.npy` | 0.3 MB | per-row scale of that table |
+| `index/query_model/tokenizer.json` | 1.4 MB | the model's WordPiece tokenizer |
+| `index/query_model/model.json` | | model name, dimensions, [UNK] id (left out of the mean), token limit |
 
 ## Measured on this build
 
-- Query time: about 0.3 s on the laptop, after loading. Loading takes about 2 s plus the
-  fastembed import, which took 21 s on the build laptop (onnxruntime's native module).
+- Query time: about 0.05 s per phrase on the laptop, after loading. Loading takes about 1 s
+  with the exported query model (it took about 15 s through fastembed and onnxruntime).
 - int8 against float32 vectors: 98.7% of the dense top 20 is the same (10,000-record sample,
   12 queries; worst query 95%).
 - 12 test problems, one per sector: most of the top 5 results were on topic by eye. A

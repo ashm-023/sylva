@@ -78,6 +78,7 @@ data/nature/catalogue/spotcheck/packets/
 # The /catalogue page was removed; its published chunks are no longer served or committed.
 frontend/public/catalogue/
 
-# Sylva-wild search index (built locally from the catalogue) and local model cache
-data/nature/wild/index/
+# Sylva-wild: the index (data/nature/wild/index/) is committed so Vercel can serve it;
+# the build-time model cache and resumable build parts are not.
 data/nature/wild/.model_cache/
+data/nature/wild/index/parts/

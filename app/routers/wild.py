@@ -23,6 +23,8 @@ limiter = RateLimiter()
 # Whole-request budget for the model path: under Vercel's 60 s function limit and the
 # page's 90 s client timeout. Past it the answer falls back to search only.
 ASK_TIMEOUT_S = 40
+# How long a request waits for an index still loading (a cold start) before answering 503.
+LOAD_WAIT_S = 15
 
 _UNAVAILABLE = {
     "loading": "The search index is loading. Try again in a few seconds.",
@@ -62,7 +64,9 @@ async def ask(req: WildAskRequest, request: Request) -> dict:
         raise HTTPException(status_code=422, detail=f"Unknown industry: {req.sector}")
     index = holder.index
     if index is None:
-        status = holder.status
+        status = await asyncio.to_thread(holder.wait, LOAD_WAIT_S)
+        index = holder.index
+    if index is None:
         raise HTTPException(status_code=503, detail=_UNAVAILABLE.get(status, _UNAVAILABLE["error"]))
 
     key = cache_key(req.intent, req.sector, req.problem)

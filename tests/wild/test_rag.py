@@ -285,3 +285,19 @@ def test_llm_answers_are_cached_and_rate_limited(client, monkeypatch):
     limited = client.post("/api/v1/wild/ask", json={**BODY, "problem": "a different hull question"}).json()
     assert limited["model"] == "search only" and "limit" in limited["summary"] and len(calls) == 2
     assert "AIzaFAKE" not in str(limited)
+
+
+def test_ask_waits_for_an_index_still_loading(client):
+    import threading
+
+    gate = threading.Event()
+
+    def load():
+        gate.wait(5)
+        holder._index, holder._status = FakeIndex(), "ready"
+
+    holder._index, holder._status = None, "loading"
+    holder._thread = threading.Thread(target=load, daemon=True)
+    holder._thread.start()
+    threading.Timer(0.2, gate.set).start()
+    assert client.post("/api/v1/wild/ask", json=BODY).status_code == 200
