@@ -23,13 +23,16 @@ import httpx
 
 LOG = logging.getLogger("sylva.rag")
 
-# Prefer current Flash models; try several in case one region/key lacks access.
+# Tried in order. As of 2026-10-22 gemini-2.5-flash answers 404 to new keys, and the
+# full Flash models often answer 503 (overloaded) while the Lite ones reply in ~2 s.
 GEMINI_MODELS = [
-    os.getenv("GEMINI_MODEL", "").strip() or "gemini-2.5-flash",
-    "gemini-3.1-flash-lite",
-    "gemini-2.5-flash-lite",
+    os.getenv("GEMINI_MODEL", "").strip() or "gemini-3.5-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-3.8-flash",
     "gemini-flash-latest",
 ]
+# Per model attempt, so one slow model leaves time for the next inside a caller's budget.
+GEMINI_TIMEOUT_S = 15.0
 
 KNOWLEDGE_CORPUS: list[dict] = [
     {
@@ -285,7 +288,7 @@ async def _call_gemini(api_key: str, prompt: str) -> tuple[dict, str]:
             models.append(m)
 
     errors: list[str] = []
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=GEMINI_TIMEOUT_S) as client:
         for model in models:
             url = (
                 "https://generativelanguage.googleapis.com/v1beta/models/"

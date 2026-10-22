@@ -163,3 +163,55 @@ def test_bm25_matches_reference_formula():
 def test_missing_catalogue_returns_2(tmp_path):
     assert build_index.main(["--catalogue", str(tmp_path / "nope.json"), "--out", str(tmp_path / "o")],
                             embedder=FakeEmbedder()) == 2
+
+
+def test_bm25_loads_without_scipy(built, monkeypatch):
+    """The served path reads bm25.npz with numpy alone (no scipy on Vercel)."""
+    from scipy import sparse
+
+    out, _ = built
+    ref = sparse.load_npz(out / "bm25.npz").tocsc()
+    monkeypatch.setitem(__import__("sys").modules, "scipy", None)
+    cols = wild.Bm25Columns(out / "bm25.npz")
+    assert cols.shape == ref.shape
+    pick = [0, 3, ref.shape[1] - 1]
+    assert np.allclose(cols.column_sum(pick), np.asarray(ref[:, pick].sum(axis=1)).ravel())
+
+
+def write_bert_tokenizer(path, vocab):
+    path.write_text(json.dumps({
+        "normalizer": {"type": "BertNormalizer", "clean_text": True, "handle_chinese_chars": True,
+                       "strip_accents": None, "lowercase": True},
+        "pre_tokenizer": {"type": "BertPreTokenizer"},
+        "post_processor": {"type": "TemplateProcessing", "special_tokens": {}},
+        "model": {"type": "WordPiece", "unk_token": "[UNK]", "continuing_subword_prefix": "##",
+                  "max_input_chars_per_word": 20, "vocab": vocab},
+    }), encoding="utf-8")
+
+
+def test_wordpiece_normalises_splits_and_matches_longest_piece(tmp_path):
+    from app.services.wild.wordpiece import WordPiece
+
+    vocab = {"[PAD]": 0, "[UNK]": 1, "ship": 2, "hull": 3, "cafe": 4, "-": 5, "##s": 6, "re": 7, "##duce": 8}
+    write_bert_tokenizer(tmp_path / "t.json", vocab)
+    wp = WordPiece(tmp_path / "t.json")
+    assert wp.encode("Ships-HULL") == [2, 6, 5, 3]
+    assert wp.encode("Café" + chr(9) + "REDUCE" + chr(0)) == [4, 7, 8]  # accents stripped, control char dropped
+    assert wp.encode("shipx " + "a" * 30) == [1, 1]  # no full match; over-long word
+    assert wp.encode("ship ship ship", max_tokens=2) == [2, 2]
+
+
+def test_static_embedder_is_mean_of_rows_without_unk(tmp_path):
+    vocab = {"[PAD]": 0, "[UNK]": 1, "ship": 2, "hull": 3, "drag": 4}
+    d = tmp_path / "query_model"
+    d.mkdir()
+    write_bert_tokenizer(d / "tokenizer.json", vocab)
+    table = np.array([[0, 0], [9, 9], [1, 0], [0, 1], [1, 1]], dtype=np.int8)
+    np.save(d / "embeddings.npy", table)
+    np.save(d / "scales.npy", np.array([1, 1, 2, 2, 1], dtype=np.float32))
+    (d / "model.json").write_text(json.dumps({"model": "m", "dim": 2, "unk_id": 1, "max_tokens": 8}))
+    emb = wild.StaticEmbedder(d)
+    got = emb(["ship hull zzz", "zzz", ""], "query")
+    assert np.allclose(got[0], [2 ** -0.5, 2 ** -0.5])  # (2,0)+(0,2), the unknown word skipped
+    assert np.allclose(got[1], 0) and np.allclose(got[2], 0)
+    assert isinstance(wild.default_embedder("m", tmp_path), wild.StaticEmbedder)

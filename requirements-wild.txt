@@ -1,6 +1,6 @@
-# Sylva-wild search index (scripts/nature/wild, app/services/wild).
-# Kept out of requirements.txt until the hosting choice for /wild is made:
-# fastembed pulls in onnxruntime (~50 MB) and scipy is ~100 MB installed.
+# Sylva-wild index BUILD (scripts/nature/wild). Serving needs only requirements.txt:
+# the built index and the exported query model are committed under data/nature/wild/index/.
 -r requirements.txt
 scipy>=1.13
 fastembed>=0.9,<0.10
+onnx>=1.16  # export_query_model.py only

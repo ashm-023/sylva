@@ -14,25 +14,33 @@ Hybrid retrieval, no API key needed:
   app/services/nature/search.py.
 
 The index is built once by scripts/nature/wild/build_index.py into
-data/nature/wild/index/ (gitignored, rebuildable from the catalogue build).
+data/nature/wild/index/ (committed, so the Vercel function ships it).
+
+Serving needs only numpy: BM25 is read as raw CSC arrays, and
+queries are embedded by StaticEmbedder from the potion table exported into
+index/query_model/ (scripts/nature/wild/export_query_model.py). scipy and
+fastembed are build-time only (requirements-wild.txt).
 """
 
 import gzip
 import hashlib
 import json
 from pathlib import Path
-from typing import Callable, Iterable, Literal, Optional, Protocol
+from typing import TYPE_CHECKING, Callable, Iterable, Literal, Optional, Protocol
 
 import numpy as np
-from scipy import sparse
 
 from app.services.nature.search import rrf
 from app.services.nature.text import tokenize
+
+if TYPE_CHECKING:
+    from scipy import sparse
 
 ROOT = Path(__file__).resolve().parents[3]
 INDEX_DIR = ROOT / "data" / "nature" / "wild" / "index"
 GROUPS_PATH = ROOT / "data" / "nature" / "catalogue" / "groups.json"
 MODEL_CACHE = ROOT / "data" / "nature" / "wild" / ".model_cache"
+QUERY_MODEL_DIR = "query_model"  # inside the index dir
 
 DEFAULT_MODEL = "minishlab/potion-retrieval-32M"
 BM25_K1, BM25_B = 1.5, 0.75
@@ -81,6 +89,41 @@ class FastEmbedder:
         return normalise_rows(np.asarray(vecs, dtype=np.float32).reshape(len(texts), -1))
 
 
+class StaticEmbedder:
+    """potion without onnxruntime: mean of the tokens' embedding rows ([UNK]
+    skipped), L2-normalised, exactly what the ONNX graph computes. Reads the files
+    written by scripts/nature/wild/export_query_model.py."""
+
+    def __init__(self, model_dir: Path):
+        from app.services.wild.wordpiece import WordPiece
+
+        cfg = json.loads((model_dir / "model.json").read_text(encoding="utf-8"))
+        self.model = cfg["model"]
+        self.dim = int(cfg["dim"])
+        self.unk_id = int(cfg["unk_id"])
+        self.max_tokens = int(cfg["max_tokens"])
+        self.table = np.load(model_dir / "embeddings.npy")
+        self.scales = np.load(model_dir / "scales.npy")
+        self.tok = WordPiece(model_dir / "tokenizer.json")
+
+    def __call__(self, texts: list[str], kind: Literal["document", "query"]) -> np.ndarray:
+        out = np.zeros((len(texts), self.dim), dtype=np.float32)
+        for i, text in enumerate(texts):
+            ids = np.asarray([t for t in self.tok.encode(text, self.max_tokens) if t != self.unk_id],
+                             dtype=np.int64)
+            if ids.size:
+                out[i] = (self.table[ids].astype(np.float32) * self.scales[ids, None]).sum(axis=0)
+        return normalise_rows(out)
+
+
+def default_embedder(model: str, index_dir: Path) -> "Embedder":
+    """The exported numpy model when the index carries it, else fastembed (local builds)."""
+    model_dir = index_dir / QUERY_MODEL_DIR
+    if (model_dir / "model.json").exists():
+        return StaticEmbedder(model_dir)
+    return FastEmbedder(model)
+
+
 def normalise_rows(mat: np.ndarray) -> np.ndarray:
     norms = np.linalg.norm(mat, axis=1, keepdims=True)
     return mat / np.where(norms == 0, 1.0, norms)
@@ -124,8 +167,10 @@ def text_hash(texts: list[str], model: str) -> str:
 
 # ---------------------------------------------------------------- BM25
 
-def build_bm25(texts: list[str], k1: float = BM25_K1, b: float = BM25_B) -> tuple[sparse.csc_matrix, list[str]]:
+def build_bm25(texts: list[str], k1: float = BM25_K1, b: float = BM25_B) -> tuple["sparse.csc_matrix", list[str]]:
     """Return (n_docs x n_terms CSC matrix of BM25 weights, vocabulary in column order)."""
+    from scipy import sparse
+
     vocab: dict[str, int] = {}
     rows, cols, tfs, lens = [], [], [], []
     for i, text in enumerate(texts):
@@ -168,6 +213,8 @@ def quantise(mat: np.ndarray) -> tuple[np.ndarray, float]:
 
 def write_index(out: Path, docs: list[dict], vectors: np.ndarray, embedder_model: str,
                 hash_: str, extra_meta: Optional[dict] = None) -> dict:
+    from scipy import sparse
+
     out.mkdir(parents=True, exist_ok=True)
     if vectors.shape[0] != len(docs):
         raise ValueError(f"{vectors.shape[0]} vectors for {len(docs)} documents")
@@ -197,20 +244,43 @@ def load_groups(path: Path = GROUPS_PATH) -> dict[str, dict]:
             for g in data["groups"]}
 
 
+class Bm25Columns:
+    """The CSC arrays of bm25.npz (scipy's save_npz format) read with numpy alone:
+    a query only ever sums a few columns, so scipy is not needed to serve."""
+
+    def __init__(self, path: Path):
+        with np.load(path) as z:
+            fmt = z["format"].item()
+            if (fmt.decode() if isinstance(fmt, bytes) else fmt) != "csc":
+                raise ValueError(f"{path} is not a CSC matrix; rebuild the index")
+            self.data, self.indices, self.indptr = z["data"], z["indices"], z["indptr"]
+            self.shape = tuple(int(n) for n in z["shape"])
+
+    def column_sum(self, cols: list[int]) -> np.ndarray:
+        out = np.zeros(self.shape[0], dtype=np.float32)
+        for j in cols:
+            lo, hi = self.indptr[j], self.indptr[j + 1]
+            out[self.indices[lo:hi]] += self.data[lo:hi]  # rows are unique within a column
+        return out
+
+
 class WildIndex:
     def __init__(self, index_dir: Path = INDEX_DIR, embedder: Optional[Embedder] = None,
                  groups: Optional[dict[str, dict]] = None,
-                 embedder_factory: Callable[[str], Embedder] = lambda m: FastEmbedder(m)):
+                 embedder_factory: Optional[Callable[[str], Embedder]] = None):
         self.meta = json.loads((index_dir / "meta.json").read_text(encoding="utf-8"))
         self.vectors = np.load(index_dir / "vectors.npy")
-        self.bm25 = sparse.load_npz(index_dir / "bm25.npz").tocsc()
+        self.bm25 = Bm25Columns(index_dir / "bm25.npz")
         terms = json.loads((index_dir / "vocab.json").read_text(encoding="utf-8"))
         self.vocab = {t: j for j, t in enumerate(terms)}
         with gzip.open(index_dir / "docs.json.gz", "rt", encoding="utf-8") as f:
             self.docs: list[dict] = json.load(f)
         if not (len(self.docs) == self.vectors.shape[0] == self.bm25.shape[0] == self.meta["count"]):
             raise ValueError("index files disagree on the record count; rebuild the index")
-        self.embedder = embedder or embedder_factory(self.meta["model"])
+        if embedder is None:
+            embedder = (embedder_factory(self.meta["model"]) if embedder_factory
+                        else default_embedder(self.meta["model"], index_dir))
+        self.embedder = embedder
         if self.embedder.model != self.meta["model"]:
             raise ValueError(f"index built with {self.meta['model']}, embedder is {self.embedder.model}")
         self.groups = groups if groups is not None else load_groups()
@@ -222,7 +292,7 @@ class WildIndex:
         cols = sorted({self.vocab[t] for t in tokenize(query) if t in self.vocab})
         if not cols:
             return np.zeros(len(self.docs), dtype=np.float32)
-        return np.asarray(self.bm25[:, cols].sum(axis=1)).ravel()
+        return self.bm25.column_sum(cols)
 
     def dense_scores(self, query: str) -> np.ndarray:
         # Score in row blocks: a whole-matrix `int8 @ float32` would upcast all ~99k x dim

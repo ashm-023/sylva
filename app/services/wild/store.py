@@ -1,13 +1,14 @@
 """
 Sylva-wild: the shared search index, loaded once in a background thread.
 
-Loading takes a few seconds (and the fastembed import took 21 s on the build
-laptop), so the server starts at once and /wild/ask answers 503 until the index
-is ready. A missing index (not built on this machine) is reported, not raised.
+Loading takes about a second with the exported query model (index/query_model/),
+so the server starts at once and /wild/ask waits for a load in progress (up to
+LOAD_WAIT_S in the router) before answering 503. A missing index (not built on
+this machine) is reported, not raised.
 
-The index module needs numpy and scipy (requirements-wild.txt). It is imported
-only when an index is actually loaded, so hosts without those packages (the
-slim Vercel function) still start and report the index as missing.
+The index module needs only numpy (requirements.txt). It is
+imported only when an index is actually loaded, so a host without them still
+starts and reports the index as missing.
 """
 
 from __future__ import annotations
@@ -65,6 +66,15 @@ class IndexHolder:
         self._index = index
         self._status = "ready"
         log.info("Sylva-wild index ready: %d records", len(index))
+
+    def wait(self, timeout: float) -> Status:
+        """Block up to `timeout` s for a load in progress. On Vercel each cold start
+        loads the index again (about a second), so a first visitor waits, not retries."""
+        status = self.status
+        thread = self._thread
+        if status == "loading" and thread is not None:
+            thread.join(timeout)
+        return self.status
 
     def set(self, index: WildIndex) -> None:
         """Install an index directly (tests, or a caller that loaded one)."""

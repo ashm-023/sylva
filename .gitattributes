@@ -1,2 +1,4 @@
 # Published catalogue files are byte-exact build outputs (hashes in the manifest); never convert line endings.
 data/nature/catalogue/build/manifest.json -text
+# Sylva-wild index: binary and generated files, served as built.
+data/nature/wild/index/** -text

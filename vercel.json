@@ -9,7 +9,7 @@
     "api/index.py": {
       "maxDuration": 60,
       "memory": 1024,
-      "includeFiles": "{data/species_db.json,data/nature/*.json,data/nature/index/*,data/nature/catalogue/sectors.json,data/nature/catalogue/build/manifest.json,app/**/*.py}",
+      "includeFiles": "{data/species_db.json,data/nature/*.json,data/nature/index/*,data/nature/catalogue/sectors.json,data/nature/catalogue/groups.json,data/nature/wild/index/**,data/nature/catalogue/build/manifest.json,app/**/*.py}",
       "excludeFiles": "{frontend/**,hardware/**,docs/**,.git/**,.vercel/**,**/.venv/**,**/node_modules/**,**/__pycache__/**,**/*.md,requirements-docker.txt,Dockerfile,render.yaml}"
     }
   },

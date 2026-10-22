@@ -1,0 +1,7 @@
+{
+  "model": "minishlab/potion-retrieval-32M",
+  "vocab": 63091,
+  "dim": 512,
+  "unk_id": 1,
+  "max_tokens": 512
+}
